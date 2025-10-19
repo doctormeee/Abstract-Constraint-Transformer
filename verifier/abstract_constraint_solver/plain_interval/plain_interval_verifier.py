@@ -31,11 +31,11 @@ from onnx2pytorch.operations.unsqueeze import Unsqueeze as OnnxUnsqueeze
 from onnx2pytorch.operations.transpose import Transpose as OnnxTranspose
 from onnx2pytorch.operations.base import OperatorWrapper
 
-class IntervalVerifier(BaseVerifier):
+class PlainIntervalVerifier(BaseVerifier):
     def __init__(self, dataset : Dataset, method, spec : Spec, device: str = 'cpu'):
         super().__init__(dataset, spec, device)
         if method != 'interval':
-            raise ValueError(f"IntervalVerifier only supports 'interval' method, got {method}.")
+            raise ValueError(f"PlainIntervalVerifier only supports 'interval' method, got {method}.")
 
     def _abstract_constraint_solving_core(self, model: nn.Module, input_lb: torch.Tensor, input_ub: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         lb = input_lb.clone()

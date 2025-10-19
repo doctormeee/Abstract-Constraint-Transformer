@@ -555,6 +555,26 @@ class SpecRefinement:
                                 unstable_count = ((lb < 0) & (ub > 0)).sum().item()
                                 print(f"🔍 {layer_name}: {unstable_count} unstable ReLU")
 
+            elif hasattr(incomplete_verifier, 'symbolic_layer_bounds') and incomplete_verifier.symbolic_layer_bounds:
+                # Symbolic Interval verifier
+                layer_names = list(incomplete_verifier.symbolic_layer_bounds.keys())
+
+                for i, layer_name in enumerate(layer_names):
+                    if 'relu' in layer_name.lower():
+                        # For ReLU layers, get the pre-activation bounds
+                        if i > 0:
+                            prev_layer_name = layer_names[i-1]
+                            prev_layer_data = incomplete_verifier.symbolic_layer_bounds[prev_layer_name]
+                            lb = prev_layer_data.get('lb')
+                            ub = prev_layer_data.get('ub')
+
+                            if lb is not None and ub is not None:
+                                relu_bounds[layer_name] = (lb.clone(), ub.clone())
+
+                                if self.verbose:
+                                    unstable_count = ((lb < 0) & (ub > 0)).sum().item()
+                                    print(f"🔍 {layer_name} (from {prev_layer_name}): {unstable_count} unstable ReLU")
+
             else:
                 if self.verbose:
                     print(f"⚠️  Verifier has not recorded layer boundary information, unable to obtain ReLU bounds")

@@ -25,8 +25,11 @@ verifier/
 │   │   ├── hybridz_transformers.py # Hybrid Zonotope transformer classes
 │   │   └── hybridz_operations.py   # MILP/LP operations and optimization
 │   │
-│   └── interval/                   # ACT Interval verification module
-│       └── interval_verifier.py    # Interval arithmetic verification
+│   ├── plain_interval/             # ACT Plain Interval verification module
+│   │   └── plain_interval_verifier.py  # Plain interval arithmetic verification
+│   │
+│   └── symbolic_interval/          # ACT Symbolic Interval verification module
+│       └── symbolic_interval_verifier.py # Symbolic interval with DeepPoly relaxations
 │
 ├── input_parser/                    # Specification parsing and data handling
 │   ├── dataset.py                  # Dataset loading and preprocessing
@@ -102,11 +105,20 @@ verifier/
   - Three core configurations: Full-precision MILP, Fully-relaxed LP, Partially-relaxed MILP+LP
   - Gurobi license management and solver integration
 
-#### **`interval/` - ACT Interval Verification**
-- **`interval_verifier.py`**: Interval arithmetic verification
+#### **`plain_interval/` - ACT Plain Interval Verification**
+- **`plain_interval_verifier.py`**: Plain interval arithmetic verification
   - Standard interval arithmetic for neural network verification
-  - Fast but potentially loose bound computation
+  - Layer-by-layer bound computation without symbolic tracking
+  - Fast but potentially loose bound computation (loses variable relationships)
   - Baseline verification method for comparison
+
+#### **`symbolic_interval/` - ACT Symbolic Interval Verification**
+- **`symbolic_interval_verifier.py`**: Symbolic interval with DeepPoly relaxations
+  - Symbolic interval propagation maintaining variable relationships
+  - DeepPoly-style activation function relaxations (ReLU, Sigmoid, Tanh)
+  - Upper bound: fixed linear relaxation
+  - Lower bound: area-optimal choice between active/inactive for ReLU
+  - More precise than plain interval, captures correlations between neurons
 
 ### **`input_parser/` - Specification and Data Handling**
 - **`dataset.py`**: Dataset loading and preprocessing utilities
