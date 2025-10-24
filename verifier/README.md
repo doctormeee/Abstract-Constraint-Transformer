@@ -113,11 +113,12 @@ verifier/
   - Baseline verification method for comparison
 
 #### **`symbolic_interval/` - ACT Symbolic Interval Verification**
-- **`symbolic_interval_verifier.py`**: Symbolic interval with DeepPoly relaxations
+- **`symbolic_interval_verifier.py`**: Symbolic interval with IBP+Symbolic Interval method
+  - Implementation based on "Interval Bound Propagation with Symbolic Bounds" paper
   - Symbolic interval propagation maintaining variable relationships
-  - DeepPoly-style activation function relaxations (ReLU, Sigmoid, Tanh)
-  - Upper bound: fixed linear relaxation
-  - Lower bound: area-optimal choice between active/inactive for ReLU
+  - **ReLU activation only** (Sigmoid/Tanh not supported as per paper)
+  - Upper bound: λ * u_x where λ = u/(u-l) (line from (l,0) to (u,u))
+  - Lower bound: [0, 0] for crossing neurons (conservative approximation)
   - More precise than plain interval, captures correlations between neurons
 
 ### **`input_parser/` - Specification and Data Handling**

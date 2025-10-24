@@ -4,6 +4,11 @@
 #########################################################################
 ##   Abstract Constraint Transformer (ACT) - Symbolic Interval Verifier ##
 ##                                                                     ##
+##   Implementation based on "Interval Bound Propagation with          ##
+##   Symbolic Bounds" (IBP+Symbolic Interval) paper                    ##
+##                                                                     ##
+##   Supports ReLU networks only (no Sigmoid/Tanh)                     ##
+##                                                                     ##
 ##   doctormeeee (https://github.com/doctormeeee) and contributors     ##
 ##   Copyright (C) 2024-2025                                           ##
 ##                                                                     ##
@@ -79,176 +84,114 @@ class SymbolicIntervalVerifier(BaseVerifier):
         self.last_output_lb = None
         self.last_output_ub = None
 
-    def _deeppoly_relu_relaxation(self, lb: torch.Tensor, ub: torch.Tensor, 
-                                   symbolic_lb: SymbolicBounds) -> SymbolicBounds:
+    def _symbolic_interval_relu_relaxation(self, input_lb: torch.Tensor, input_ub: torch.Tensor,
+                                            symbolic_bounds: SymbolicBounds) -> SymbolicBounds:
         """
-        DeepPoly ReLU relaxation:
-        - Upper bound: fixed line from (lb, max(0, lb)) to (ub, max(0, ub))
-        - Lower bound: choose between y=x (active) and y=0 (inactive) based on area minimization
+        Symbolic Interval ReLU relaxation based on IBP+Symbolic Interval paper.
+        
+        For ReLU activation: y = max(0, x)
+        Given symbolic bounds for layer input:
+          - Lower symbolic: Eq_low = a_l * z + b_l  (concretizes to [l_low, u_low])
+          - Upper symbolic: Eq_up = a_u * z + b_u   (concretizes to [l_up, u_up])
+        
+        Three cases per neuron (based on the overall bounds [l, u] where l = min(l_low, l_up), u = max(u_low, u_up)):
+        1) If u ≤ 0 (always inactive): y ∈ [0, 0]
+        2) If l ≥ 0 (always active): y ∈ [Eq_low, Eq_up]
+        3) If l < 0 < u (crossing): 
+           - Lower ReLU: ReLU(Eq_low) → (u_low / (u_low - l_low)) * Eq_low
+           - Upper ReLU: ReLU(Eq_up) → (u_up / (u_up - l_up)) * (Eq_up - l_up)
+        
+        Key insight: l_low, u_low are bounds for Eq_low; l_up, u_up are bounds for Eq_up.
+        They are different in general!
         
         Args:
-            lb: Concrete lower bounds for this layer
-            ub: Concrete upper bounds for this layer
-            symbolic_lb: Symbolic bounds from previous layer
+            input_lb: Concrete input lower bounds to the network (z_min)
+            input_ub: Concrete input upper bounds to the network (z_max)
+            symbolic_bounds: Symbolic bounds (Eq_low and Eq_up) for this layer
         
         Returns:
             New symbolic bounds after ReLU
         """
-        device = lb.device
-        shape = lb.shape
-        flat_lb = lb.view(-1)
-        flat_ub = ub.view(-1)
-        neuron_count = flat_lb.numel()
+        device = symbolic_bounds.lower_coef.device
+        neuron_count = symbolic_bounds.lower_coef.shape[0]
         
         # Initialize output symbolic bounds
-        new_lower_coef = symbolic_lb.lower_coef.clone()
-        new_lower_bias = symbolic_lb.lower_bias.clone()
-        new_upper_coef = symbolic_lb.upper_coef.clone()
-        new_upper_bias = symbolic_lb.upper_bias.clone()
+        new_lower_coef = symbolic_bounds.lower_coef.clone()
+        new_lower_bias = symbolic_bounds.lower_bias.clone()
+        new_upper_coef = symbolic_bounds.upper_coef.clone()
+        new_upper_bias = symbolic_bounds.upper_bias.clone()
+        
+        # Flatten input bounds for concretization
+        input_lb_flat = input_lb.view(-1)
+        input_ub_flat = input_ub.view(-1)
         
         for i in range(neuron_count):
-            l = flat_lb[i].item()
-            u = flat_ub[i].item()
+            # Concretize Eq_low to get [l_low, u_low]
+            lower_coef_i = symbolic_bounds.lower_coef[i, :]
+            lower_bias_i = symbolic_bounds.lower_bias[i]
             
-            if u <= 0:
-                # Always inactive: y = 0
+            # l_low = min over z of (a_l * z + b_l)
+            lower_coef_pos = torch.clamp(lower_coef_i, min=0)
+            lower_coef_neg = torch.clamp(lower_coef_i, max=0)
+            l_low = (lower_coef_pos @ input_lb_flat + lower_coef_neg @ input_ub_flat + lower_bias_i).item()
+            
+            # u_low = max over z of (a_l * z + b_l)
+            u_low = (lower_coef_pos @ input_ub_flat + lower_coef_neg @ input_lb_flat + lower_bias_i).item()
+            
+            # Concretize Eq_up to get [l_up, u_up]
+            upper_coef_i = symbolic_bounds.upper_coef[i, :]
+            upper_bias_i = symbolic_bounds.upper_bias[i]
+            
+            # l_up = min over z of (a_u * z + b_u)
+            upper_coef_pos = torch.clamp(upper_coef_i, min=0)
+            upper_coef_neg = torch.clamp(upper_coef_i, max=0)
+            l_up = (upper_coef_pos @ input_lb_flat + upper_coef_neg @ input_ub_flat + upper_bias_i).item()
+            
+            # u_up = max over z of (a_u * z + b_u)
+            u_up = (upper_coef_pos @ input_ub_flat + upper_coef_neg @ input_lb_flat + upper_bias_i).item()
+            
+            # Determine overall bounds for this neuron
+            l_overall = min(l_low, l_up)
+            u_overall = max(u_low, u_up)
+            
+            if u_overall <= 0:
+                # Case 1: Always inactive, y = 0
                 new_lower_coef[i, :] = 0
                 new_lower_bias[i] = 0
                 new_upper_coef[i, :] = 0
                 new_upper_bias[i] = 0
                 
-            elif l >= 0:
-                # Always active: y = x (identity)
-                # Bounds remain the same
+            elif l_overall >= 0:
+                # Case 2: Always active, y = x
+                # Output bounds remain: [Eq_low, Eq_up]
                 pass
                 
             else:
-                # Crossing case: l < 0 < u
-                # Upper bound: line from (l, 0) to (u, u)
-                # slope = u / (u - l), intercept = 0
-                upper_slope = u / (u - l)
-                upper_intercept = 0.0
-                
-                new_upper_coef[i, :] = symbolic_lb.upper_coef[i, :] * upper_slope
-                new_upper_bias[i] = symbolic_lb.upper_bias[i] * upper_slope + upper_intercept
-                
-                # Lower bound: choose between y=0 and y=x
-                # Area for y=0: triangle with base u, height u → area = 0.5 * u * u
-                # Area for y=x: triangle with base -l, height -l → area = 0.5 * l * l
-                # Choose the one with smaller area
-                if abs(l) < abs(u):
-                    # Choose y = x (active)
-                    # Lower bound coefficients remain the same
-                    pass
+                # Case 3: Crossing case (l_overall < 0 < u_overall)
+                # Lower bound: ReLU(Eq_low) → (u_low / (u_low - l_low)) * Eq_low
+                if u_low > l_low:  # Avoid division by zero
+                    lambda_lower = u_low / (u_low - l_low)
+                    new_lower_coef[i, :] = symbolic_bounds.lower_coef[i, :] * lambda_lower
+                    new_lower_bias[i] = symbolic_bounds.lower_bias[i] * lambda_lower
                 else:
-                    # Choose y = 0 (inactive)
+                    # Degenerate case: set to 0
                     new_lower_coef[i, :] = 0
                     new_lower_bias[i] = 0
+                
+                # Upper bound: ReLU(Eq_up) → (u_up / (u_up - l_up)) * (Eq_up - l_up)
+                if u_up > l_up:  # Avoid division by zero
+                    lambda_upper = u_up / (u_up - l_up)
+                    new_upper_coef[i, :] = symbolic_bounds.upper_coef[i, :] * lambda_upper
+                    new_upper_bias[i] = (symbolic_bounds.upper_bias[i] - l_up) * lambda_upper
+                else:
+                    # Degenerate case: set to 0
+                    new_upper_coef[i, :] = 0
+                    new_upper_bias[i] = 0
         
         return SymbolicBounds(new_lower_coef, new_lower_bias,
                              new_upper_coef, new_upper_bias)
 
-    def _deeppoly_sigmoid_relaxation(self, lb: torch.Tensor, ub: torch.Tensor,
-                                      symbolic_lb: SymbolicBounds) -> SymbolicBounds:
-        """
-        DeepPoly Sigmoid relaxation using tangent lines
-        """
-        device = lb.device
-        flat_lb = lb.view(-1)
-        flat_ub = ub.view(-1)
-        neuron_count = flat_lb.numel()
-        
-        new_lower_coef = symbolic_lb.lower_coef.clone()
-        new_lower_bias = symbolic_lb.lower_bias.clone()
-        new_upper_coef = symbolic_lb.upper_coef.clone()
-        new_upper_bias = symbolic_lb.upper_bias.clone()
-        
-        for i in range(neuron_count):
-            l = flat_lb[i].item()
-            u = flat_ub[i].item()
-            
-            # Sigmoid function and its derivative
-            sigmoid_l = torch.sigmoid(torch.tensor(l)).item()
-            sigmoid_u = torch.sigmoid(torch.tensor(u)).item()
-            
-            if abs(u - l) < 1e-6:
-                # Tight bounds, use exact value
-                new_lower_coef[i, :] = 0
-                new_lower_bias[i] = sigmoid_l
-                new_upper_coef[i, :] = 0
-                new_upper_bias[i] = sigmoid_u
-            else:
-                # Upper bound: line connecting (l, σ(l)) and (u, σ(u))
-                upper_slope = (sigmoid_u - sigmoid_l) / (u - l)
-                upper_intercept = sigmoid_l - upper_slope * l
-                
-                new_upper_coef[i, :] = symbolic_lb.upper_coef[i, :] * upper_slope
-                new_upper_bias[i] = symbolic_lb.upper_bias[i] * upper_slope + upper_intercept
-                
-                # Lower bound: tangent line at the midpoint
-                mid = (l + u) / 2
-                sigmoid_mid = torch.sigmoid(torch.tensor(mid)).item()
-                sigmoid_mid_deriv = sigmoid_mid * (1 - sigmoid_mid)
-                
-                lower_slope = sigmoid_mid_deriv
-                lower_intercept = sigmoid_mid - lower_slope * mid
-                
-                new_lower_coef[i, :] = symbolic_lb.lower_coef[i, :] * lower_slope
-                new_lower_bias[i] = symbolic_lb.lower_bias[i] * lower_slope + lower_intercept
-        
-        return SymbolicBounds(new_lower_coef, new_lower_bias,
-                             new_upper_coef, new_upper_bias)
 
-    def _deeppoly_tanh_relaxation(self, lb: torch.Tensor, ub: torch.Tensor,
-                                   symbolic_lb: SymbolicBounds) -> SymbolicBounds:
-        """
-        DeepPoly Tanh relaxation using tangent lines
-        """
-        device = lb.device
-        flat_lb = lb.view(-1)
-        flat_ub = ub.view(-1)
-        neuron_count = flat_lb.numel()
-        
-        new_lower_coef = symbolic_lb.lower_coef.clone()
-        new_lower_bias = symbolic_lb.lower_bias.clone()
-        new_upper_coef = symbolic_lb.upper_coef.clone()
-        new_upper_bias = symbolic_lb.upper_bias.clone()
-        
-        for i in range(neuron_count):
-            l = flat_lb[i].item()
-            u = flat_ub[i].item()
-            
-            # Tanh function values
-            tanh_l = torch.tanh(torch.tensor(l)).item()
-            tanh_u = torch.tanh(torch.tensor(u)).item()
-            
-            if abs(u - l) < 1e-6:
-                # Tight bounds, use exact value
-                new_lower_coef[i, :] = 0
-                new_lower_bias[i] = tanh_l
-                new_upper_coef[i, :] = 0
-                new_upper_bias[i] = tanh_u
-            else:
-                # Upper bound: line connecting (l, tanh(l)) and (u, tanh(u))
-                upper_slope = (tanh_u - tanh_l) / (u - l)
-                upper_intercept = tanh_l - upper_slope * l
-                
-                new_upper_coef[i, :] = symbolic_lb.upper_coef[i, :] * upper_slope
-                new_upper_bias[i] = symbolic_lb.upper_bias[i] * upper_slope + upper_intercept
-                
-                # Lower bound: tangent line at the point with maximum derivative
-                mid = (l + u) / 2
-                tanh_mid = torch.tanh(torch.tensor(mid)).item()
-                tanh_mid_deriv = 1 - tanh_mid ** 2
-                
-                lower_slope = tanh_mid_deriv
-                lower_intercept = tanh_mid - lower_slope * mid
-                
-                new_lower_coef[i, :] = symbolic_lb.lower_coef[i, :] * lower_slope
-                new_lower_bias[i] = symbolic_lb.lower_bias[i] * lower_slope + lower_intercept
-        
-        return SymbolicBounds(new_lower_coef, new_lower_bias,
-                             new_upper_coef, new_upper_bias)
 
     def _abstract_constraint_solving_core(self, model: nn.Module, input_lb: torch.Tensor, input_ub: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -371,7 +314,7 @@ class SymbolicIntervalVerifier(BaseVerifier):
                 # Store pre-activation bounds for BaB (before ReLU)
                 layer_name = f"relu_{layer_index}"
                 
-                # Apply DeepPoly ReLU relaxation
+                # Get concrete bounds for this layer (for BaB and constraint checking)
                 concrete_lb_reshaped = concrete_lb.view(current_shape)
                 concrete_ub_reshaped = concrete_ub.view(current_shape)
                 
@@ -405,8 +348,10 @@ class SymbolicIntervalVerifier(BaseVerifier):
                             concrete_lb_reshaped = flat_lb.view(current_shape)
                             concrete_ub_reshaped = flat_ub.view(current_shape)
                 
-                symbolic_bounds = self._deeppoly_relu_relaxation(
-                    concrete_lb_reshaped, concrete_ub_reshaped, symbolic_bounds
+                # Apply symbolic interval ReLU relaxation
+                # Pass the original input bounds (not the layer bounds!)
+                symbolic_bounds = self._symbolic_interval_relu_relaxation(
+                    input_lb, input_ub, symbolic_bounds
                 )
                 
                 # Update concrete bounds
@@ -424,28 +369,16 @@ class SymbolicIntervalVerifier(BaseVerifier):
                 layer_index += 1
 
             elif isinstance(layer, nn.Sigmoid):
-                # Apply DeepPoly Sigmoid relaxation
-                concrete_lb_reshaped = concrete_lb.view(current_shape)
-                concrete_ub_reshaped = concrete_ub.view(current_shape)
-                
-                symbolic_bounds = self._deeppoly_sigmoid_relaxation(
-                    concrete_lb_reshaped, concrete_ub_reshaped, symbolic_bounds
+                raise NotImplementedError(
+                    "Sigmoid activation is not supported in Symbolic Interval verification. "
+                    "This method only supports ReLU activations as per IBP+Symbolic Interval paper."
                 )
-                
-                # Update concrete bounds
-                concrete_lb, concrete_ub = symbolic_bounds.concretize(input_lb.view(-1), input_ub.view(-1))
 
             elif isinstance(layer, nn.Tanh):
-                # Apply DeepPoly Tanh relaxation
-                concrete_lb_reshaped = concrete_lb.view(current_shape)
-                concrete_ub_reshaped = concrete_ub.view(current_shape)
-                
-                symbolic_bounds = self._deeppoly_tanh_relaxation(
-                    concrete_lb_reshaped, concrete_ub_reshaped, symbolic_bounds
+                raise NotImplementedError(
+                    "Tanh activation is not supported in Symbolic Interval verification. "
+                    "This method only supports ReLU activations as per IBP+Symbolic Interval paper."
                 )
-                
-                # Update concrete bounds
-                concrete_lb, concrete_ub = symbolic_bounds.concretize(input_lb.view(-1), input_ub.view(-1))
 
             elif isinstance(layer, nn.Flatten) or isinstance(layer, OnnxFlatten):
                 print("Flattening layer detected.")
@@ -500,7 +433,7 @@ class SymbolicIntervalVerifier(BaseVerifier):
         return output_lb.view(current_shape), output_ub.view(current_shape), None
 
     def _abstract_constraint_solving(self, input_lb: torch.Tensor, input_ub: torch.Tensor, sample_idx: int) -> VerificationStatus:
-        print(f"Performing Symbolic Interval propagation with DeepPoly relaxations")
+        print(f"Performing Symbolic Interval propagation (IBP+Symbolic Interval method for ReLU networks)")
 
         output_lb, output_ub, _ = self._abstract_constraint_solving_core(
             self.spec.model.pytorch_model, input_lb, input_ub
