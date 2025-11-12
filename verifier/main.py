@@ -116,9 +116,13 @@ def main():
                         choices=['interval', 'eran', 'abcrown', 'hybridz'],
                         help='Backend verification engine. "interval": ACT native interval analysis, "eran": ERAN external verifier, "abcrown": αβ-CROWN external verifier, "hybridz": ACT novel hybrid zonotope verifier')
     parser.add_argument('--method', type=str, default=None, 
-                        help='Verification method. ERAN: [deepzono, refinezono, deeppoly, refinepoly], αβ-CROWN: [alpha, beta, alpha_beta], ACT-HybridZ: [hybridz, hybridz_relaxed, hybridz_relaxed_with_bab], ACT-Interval: [interval]')
+                        help='Verification method. ERAN: [deepzono, refinezono, deeppoly, refinepoly], αβ-CROWN: [alpha, beta, alpha_beta], ACT-HybridZ: [hybridz, hybridz_relaxed, hybridz_relaxed_with_bab], ACT-Interval: [plain_interval, symbolic_interval]')
     parser.add_argument('--device', type=str, default='cpu', choices=['cpu', 'cuda'],
                         help='Computation device (cpu or cuda)')
+    
+    # ACT Counterexample Extraction
+    parser.add_argument('--extract_counterexample', action='store_true', default=False,
+                        help='ACT innovation: Enable counterexample extraction using Gurobi LP solver for symbolic_interval method. When enabled, attempts to find concrete adversarial examples for UNSAT results')
 
     # ACT Hybrid Zonotope Novel Features
     parser.add_argument('--relaxation_ratio', type=float, default=1.0,
@@ -322,12 +326,18 @@ def main():
 
     elif verifier_type == 'interval':
         # Support both plain and symbolic interval methods
-        if method == 'interval':
+        if method == 'plain_interval':
             verifier = PlainIntervalVerifier(dataset, method, spec)
+            if args_dict["extract_counterexample"]:
+                print("Warning: --extract_counterexample is only supported for symbolic_interval method, ignoring")
         elif method == 'symbolic_interval':
-            verifier = SymbolicIntervalVerifier(dataset, method, spec)
+            verifier = SymbolicIntervalVerifier(dataset, method, spec, 
+                                                extract_counterexample=args_dict["extract_counterexample"])
+            if args_dict["extract_counterexample"]:
+                print("Counterexample extraction enabled for symbolic_interval method")
+                print("   Will attempt to find concrete adversarial examples using Gurobi LP solver")
         else:
-            raise ValueError(f"Interval verifier supports 'interval' and 'symbolic_interval' methods, got {method}.")
+            raise ValueError(f"Interval verifier supports 'plain_interval' and 'symbolic_interval' methods, got {method}.")
 
         if args_dict["enable_spec_refinement"]:
             print("Enabling specification refinement BaB verification")

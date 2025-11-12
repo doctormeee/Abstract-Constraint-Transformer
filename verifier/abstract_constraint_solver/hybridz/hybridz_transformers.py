@@ -16,35 +16,9 @@ import sys
 import psutil
 import time
 
-import path_config
+import path_config  # Auto-runs setup_gurobi_license()
 
 from abstract_constraint_solver.hybridz.hybridz_operations import HybridZonotopeOps
-
-def setup_gurobi_license():
-    if 'GRB_LICENSE_FILE' not in os.environ:
-        if 'ACTHOME' in os.environ:
-            license_path = os.path.join(os.environ['ACTHOME'], 'gurobi', 'gurobi.lic')
-            print(f"[ACT] Using ACTHOME environment variable: {os.environ['ACTHOME']}")
-        else:
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            solver_dir = os.path.dirname(current_dir)  
-            verifier_dir = os.path.dirname(solver_dir)  
-            project_root = os.path.dirname(verifier_dir) 
-            license_path = os.path.join(project_root, 'gurobi', 'gurobi.lic')
-            print(f"[ACT] Auto-detecting project root from file location")
-        
-        license_path = os.path.abspath(license_path)
-        
-        if os.path.exists(license_path):
-            os.environ['GRB_LICENSE_FILE'] = license_path
-            print(f"[ACT] Gurobi license found and set: {license_path}")
-        else:
-            print(f"[WARN] Gurobi license not found at: {license_path}")
-            print(f"[INFO] Please ensure gurobi.lic is placed in: {os.path.dirname(license_path)}")
-    else:
-        print(f"[ACT] Using existing Gurobi license: {os.environ['GRB_LICENSE_FILE']}")
-
-setup_gurobi_license()
 
 torch.set_printoptions(
     linewidth=500,
