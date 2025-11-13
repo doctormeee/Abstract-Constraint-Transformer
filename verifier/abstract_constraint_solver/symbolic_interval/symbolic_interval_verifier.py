@@ -578,33 +578,55 @@ class SymbolicIntervalVerifier(BaseVerifier):
         print(f"📊 Verification verdict: {verdict.name}")
         return verdict
 
-    def get_counterexample(self) -> Optional[torch.Tensor]:
+    def get_counterexample(self) -> tuple[Optional[torch.Tensor], str]:
         """
-        Extract counterexample using Gurobi LP solver on symbolic bounds
+        Extract counterexample using Gurobi LP solver on symbolic interval bounds
         
-        Since we maintain symbolic affine bounds y = A*z + b, the network output is a linear function of input z.
-        We can formulate counterexample search as a linear programming problem:
+        Goal: Find a concrete input z ∈ [input_lb, input_ub] that violates the property
         
-        maximize: violation_objective(y)
-        subject to:
-            - y = A * z + b  (output symbolic bounds)
-            - z_lb <= z <= z_ub  (input box constraints)
+        Method:
+        1. Use symbolic interval linear relaxation:
+           - y_lower[i] = A_lower[i] * z + b_lower[i]
+           - y_upper[i] = A_upper[i] * z + b_upper[i]
+           - Guaranteed: actual_output[i] ∈ [y_lower[i], y_upper[i]]
         
-        This is exact for ReLU networks using symbolic interval relaxation.
+        2. Formulate LP to find candidate counterexample:
+           maximize: max_j(y_upper[j] - y_lower[true_label])  for j ≠ true_label
+           subject to: z ∈ [input_lb, input_ub]
+           
+           If optimal value > 0, we found a z* where:
+           - Some class j's upper bound > true_label's lower bound
+           - This suggests potential misclassification
+        
+        3. Verify candidate on actual network:
+           - Run actual_output = network(z*)
+           - Check if argmax(actual_output) ≠ true_label
+           - If yes → real counterexample! ✅
+           - If no → false positive due to over-approximation ⚠️
+        
+        Note: This is not guaranteed to find counterexamples even if they exist,
+        because the linear relaxation is conservative. But if we find one and it
+        verifies on the actual network, it's a real counterexample.
         
         Returns:
-            Concrete input violating the property, or None if no violation exists
+            tuple[Optional[torch.Tensor], str]:
+                - counterexample: Concrete counterexample input if found and verified, None otherwise
+                - status: One of:
+                    - 'found': Real counterexample found and verified
+                    - 'infeasible': LP infeasible, property verified
+                    - 'relaxation_artifact': LP found solution but actual network correct
+                    - 'unknown': Solver error or timeout
         """
         if self.last_symbolic_bounds is None:
             print("Warning: No symbolic bounds available for counterexample extraction")
-            return None
+            return None, 'unknown'
         
         try:
             import gurobipy as gp
             from gurobipy import GRB
         except ImportError:
-            print("Error: Gurobi not available. Please install gurobipy and ensure Gurobi license is available (set GRB_LICENSE_FILE)")
-            return None
+            print("Error: Gurobi not available. Install gurobipy and set GRB_LICENSE_FILE")
+            return None, 'unknown'
         
         try:
             # Get input bounds from last run
@@ -612,25 +634,36 @@ class SymbolicIntervalVerifier(BaseVerifier):
             input_ub = self.input_ub[0] if self.input_ub.ndim > 1 else self.input_ub
             
             # Get output specification
-            output_constraints = self.spec.output_spec.output_constraints
             true_label = self.spec.output_spec.labels[0].item() if self.spec.output_spec.labels is not None else None
             
+            if true_label is None:
+                print("Error: Cannot extract counterexample without true label")
+                return None, 'unknown'
+            
             # Extract symbolic bounds matrices
-            # Output: y = A * z + b
             A_lower = self.last_symbolic_bounds.lower_A.detach().cpu().numpy()  # (output_dim, input_dim)
             b_lower = self.last_symbolic_bounds.lower_b.detach().cpu().numpy()  # (output_dim,)
             A_upper = self.last_symbolic_bounds.upper_A.detach().cpu().numpy()
             b_upper = self.last_symbolic_bounds.upper_b.detach().cpu().numpy()
             
-            input_lb_np = input_lb.detach().cpu().numpy().flatten()  # (input_dim,)
+            input_lb_np = input_lb.detach().cpu().numpy().flatten()
             input_ub_np = input_ub.detach().cpu().numpy().flatten()
             
             input_dim = input_lb_np.shape[0]
             output_dim = A_lower.shape[0]
             
-            print(f"Configuring Gurobi LP problem:")
-            print(f"   Input dimension: {input_dim}")
-            print(f"   Output dimension: {output_dim}")
+            print(f"\n{'='*80}")
+            print(f"Gurobi Counterexample Extraction")
+            print(f"{'='*80}")
+            print(f"Objective: Find z ∈ [input_lb, input_ub] that violates property")
+            print(f"Method: LP on symbolic interval relaxation")
+            print(f"  y_lower[i] = A_lower[i] * z + b_lower[i]")
+            print(f"  y_upper[i] = A_upper[i] * z + b_upper[i]")
+            print(f"  (Both are functions of the same z)")
+            print(f"")
+            print(f"Input dimension: {input_dim}")
+            print(f"Output dimension: {output_dim}")
+            print(f"True label: {true_label}")
             
             # Create Gurobi environment and model (following hybridz_operations configuration)
             env = gp.Env(empty=True)
@@ -647,15 +680,16 @@ class SymbolicIntervalVerifier(BaseVerifier):
             model.setParam('BarHomogeneous', 1)
             model.setParam('Threads', 0)  # Use all available threads
             model.setParam('TimeLimit', 60.0)  # 60 seconds time limit
+            model.setParam('DualReductions', 0)  # Help distinguish infeas vs unbounded
             
             # Special configuration for output layer
             if output_dim <= 20:
                 print(f"   Detected output layer (output_dim={output_dim}), using high-precision configuration")
-                model.setParam('NumericFocus', 2)  # Higher numerical precision
-                model.setParam('FeasibilityTol', 1e-7)
-                model.setParam('OptimalityTol', 1e-7)
+                model.setParam('NumericFocus', 3)  # Highest numerical precision
+                model.setParam('FeasibilityTol', 1e-9)
+                model.setParam('OptimalityTol', 1e-9)
             else:
-                model.setParam('NumericFocus', 1)
+                model.setParam('NumericFocus', 2)
                 model.setParam('Presolve', 2)
             
             # Decision variables: input z
@@ -673,64 +707,22 @@ class SymbolicIntervalVerifier(BaseVerifier):
                 model.addConstr(y_lower[i] == A_lower[i, :] @ z + b_lower[i], name=f"output_lower_{i}")
                 model.addConstr(y_upper[i] == A_upper[i, :] @ z + b_upper[i], name=f"output_upper_{i}")
             
-            # Build objective function based on property type
-            violation_found = False
+            # Objective: Find adversarial example for local robustness
+            # Maximize max_j(y_upper[j] - y_lower[true_label]) for j != true_label
+            print(f"   Property: Local robustness (true label = {true_label})")
+            print(f"   Objective: maximize max_j(y_upper[j] - y_lower[{true_label}])")
             
-            if output_constraints is not None:
-                for constraint in output_constraints:
-                    if constraint['type'] == 'local_robustness':
-                        # Find adversarial example: maximize max_j(y_upper[j] - y_lower[true_label]) for j != true_label
-                        if true_label is not None:
-                            print(f"   Property: Local robustness (true label = {true_label})")
-                            
-                            # Introduce auxiliary variable to represent max
-                            max_violation = model.addVar(lb=-GRB.INFINITY, name="max_violation")
-                            
-                            # max_violation >= y_upper[j] - y_lower[true_label] for all j != true_label
-                            for j in range(output_dim):
-                                if j != true_label:
-                                    model.addConstr(max_violation >= y_upper[j] - y_lower[true_label],
-                                                  name=f"violation_{j}")
-                            
-                            # Maximize violation
-                            model.setObjective(max_violation, GRB.MAXIMIZE)
-                            violation_found = True
-                            break
-                    
-                    elif constraint['type'] == 'greater_than':
-                        # Want y[idx1] > y[idx2], so find violation: maximize y_upper[idx2] - y_lower[idx1]
-                        idx1 = constraint.get('output_idx_1', 0)
-                        idx2 = constraint.get('output_idx_2', 1)
-                        print(f"   Property: output[{idx1}] > output[{idx2}]")
-                        model.setObjective(y_upper[idx2] - y_lower[idx1], GRB.MAXIMIZE)
-                        violation_found = True
-                        break
-                    
-                    elif constraint['type'] == 'less_than':
-                        # Want y[idx1] < y[idx2], so find violation: maximize y_upper[idx1] - y_lower[idx2]
-                        idx1 = constraint.get('output_idx_1', 0)
-                        idx2 = constraint.get('output_idx_2', 1)
-                        print(f"   Property: output[{idx1}] < output[{idx2}]")
-                        model.setObjective(y_upper[idx1] - y_lower[idx2], GRB.MAXIMIZE)
-                        violation_found = True
-                        break
+            # Introduce auxiliary variable to represent max
+            max_violation = model.addVar(lb=-GRB.INFINITY, name="max_violation")
             
-            # Default: local robustness
-            if not violation_found and true_label is not None:
-                print(f"   Property: Local robustness (default, true label = {true_label})")
-                max_violation = model.addVar(lb=-GRB.INFINITY, name="max_violation")
-                for j in range(output_dim):
-                    if j != true_label:
-                        model.addConstr(max_violation >= y_upper[j] - y_lower[true_label],
-                                      name=f"violation_{j}")
-                model.setObjective(max_violation, GRB.MAXIMIZE)
-                violation_found = True
+            # max_violation >= y_upper[j] - y_lower[true_label] for all j != true_label
+            for j in range(output_dim):
+                if j != true_label:
+                    model.addConstr(max_violation >= y_upper[j] - y_lower[true_label],
+                                  name=f"violation_{j}")
             
-            if not violation_found:
-                print("Warning: No clear verification objective, cannot extract counterexample")
-                model.dispose()
-                env.dispose()
-                return None
+            # Maximize violation
+            model.setObjective(max_violation, GRB.MAXIMIZE)
             
             # Solve LP
             print("   Solving LP with Gurobi...")
@@ -755,38 +747,59 @@ class SymbolicIntervalVerifier(BaseVerifier):
                         print(f"   Logits: {actual_output.cpu().numpy()}")
                         
                         if predicted_label != true_label:
-                            print(f"Counterexample verified: Model misclassified!")
+                            print(f"\n✅ REAL COUNTEREXAMPLE FOUND!")
+                            print(f"   Found concrete input in perturbation region that causes misclassification")
+                            model.dispose()
+                            env.dispose()
+                            return z_reshaped, 'found'
                         else:
-                            print(f"Warning: LP found violation in relaxation, but actual network is still correct")
-                            print(f"   (This is due to ReLU over-approximation, which is expected)")
-                
-                model.dispose()
-                env.dispose()
-                return z_solution.view(input_lb.shape)
+                            print(f"\n⚠️  LP found violation in linear relaxation, but actual network still correct")
+                            print(f"   This is expected due to ReLU over-approximation (relaxation artifact)")
+                            print(f"   Property might still be violated by another input point")
+                            model.dispose()
+                            env.dispose()
+                            return None, 'relaxation_artifact'
             
             elif model.status == GRB.INFEASIBLE:
-                print("Success: Gurobi proved no counterexample exists (problem infeasible)")
+                print(f"\n✅ LP INFEASIBLE: No counterexample exists in linear relaxation!")
+                print(f"   Property is formally verified (within relaxation bounds)")
                 model.dispose()
                 env.dispose()
-                return None
+                return None, 'infeasible'
+            
+            elif model.status == GRB.UNBOUNDED:
+                print(f"\n⚠️  Gurobi status: UNBOUNDED - objective can grow indefinitely")
+                print(f"   This suggests the LP formulation may have issues")
+                print(f"   Possible cause: Symbolic bounds may be degenerate (all zeros)")
+                print(f"   Treating as unknown")
+                model.dispose()
+                env.dispose()
+                return None, 'unknown'
+            
+            elif model.status == GRB.INF_OR_UNBD:
+                print(f"\n⚠️  Gurobi status: INF_OR_UNBD - model is either infeasible or unbounded")
+                print(f"   Treating as unknown (potential numerical issues)")
+                model.dispose()
+                env.dispose()
+                return None, 'unknown'
             
             elif model.status == GRB.TIME_LIMIT:
-                print("Timeout: Gurobi reached time limit, no definite answer")
+                print(f"\n⏱️  TIMEOUT: Gurobi reached time limit")
                 model.dispose()
                 env.dispose()
-                return None
+                return None, 'unknown'
             
             else:
-                print(f"Warning: Gurobi solver status: {model.status}")
+                print(f"\n⚠️  Gurobi solver status: {model.status}")
                 model.dispose()
                 env.dispose()
-                return None
+                return None, 'unknown'
                 
         except Exception as e:
             print(f"Error: Gurobi counterexample extraction failed: {e}")
             import traceback
             traceback.print_exc()
-            return None
+            return None, 'unknown'
 
     def verify(self) -> VerificationStatus:
         print("Starting Symbolic Interval verification pipeline")
@@ -839,27 +852,30 @@ class SymbolicIntervalVerifier(BaseVerifier):
                     print(f"{'='*80}\n")
                     
                     # Try to extract a concrete counterexample
-                    counterexample = self.get_counterexample()
+                    counterexample, status = self.get_counterexample()
                     
-                    if counterexample is not None:
-                        # Verify the counterexample on actual network
-                        with torch.no_grad():
-                            ce_output = self.spec.model.pytorch_model(counterexample.unsqueeze(0)).squeeze(0)
-                            ce_predicted = torch.argmax(ce_output).item()
-                            
-                            if ce_predicted != true_label:
-                                print(f"COUNTEREXAMPLE CONFIRMED: Network misclassifies!")
-                                print(f"   True label: {true_label}, Predicted: {ce_predicted}")
-                                print(f"   Counterexample saved to self.last_counterexample")
-                                self.last_counterexample = counterexample
-                                results.append(VerificationStatus.UNSAT)
-                            else:
-                                print(f"Warning: Counterexample found in relaxation but network still correct")
-                                print(f"   (Over-approximation artifact - property likely HOLDS)")
-                                results.append(VerificationStatus.UNKNOWN)
-                    else:
-                        print(f"Success: No counterexample found - property verified!")
+                    if status == 'found':
+                        # Real counterexample found
+                        print(f"COUNTEREXAMPLE CONFIRMED: Network misclassifies!")
+                        print(f"   True label: {true_label}, Predicted: {torch.argmax(self.spec.model.pytorch_model(counterexample.unsqueeze(0)).squeeze(0)).item()}")
+                        print(f"   Counterexample saved to self.last_counterexample")
+                        self.last_counterexample = counterexample
+                        results.append(VerificationStatus.UNSAT)
+                    elif status == 'infeasible':
+                        # LP infeasible - property actually holds!
+                        print(f"✅ LP proved no counterexample exists - property verified!")
                         results.append(VerificationStatus.SAT)
+                    elif status == 'relaxation_artifact':
+                        # LP found violation but actual network is correct
+                        print(f"⚠️  Relaxation artifact - cannot determine verification status")
+                        print(f"   Symbolic interval says UNSAT, but LP candidate doesn't violate")
+                        print(f"   Returning UNKNOWN (conservative)")
+                        results.append(VerificationStatus.UNKNOWN)
+                    else:  # status == 'unknown'
+                        # Solver error, timeout, or other issue
+                        print(f"⚠️  Cannot determine verification status (solver issue)")
+                        print(f"   Returning UNKNOWN (conservative)")
+                        results.append(VerificationStatus.UNKNOWN)
                 else:
                     # Without counterexample extraction, return UNSAT (conservative)
                     print(f"   Counterexample extraction disabled, returning UNSAT (conservative)")
