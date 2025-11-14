@@ -63,7 +63,7 @@ class SymbolicBounds:
         self.upper_A = upper_A
         self.upper_b = upper_b
     
-    def concretize(self, input_lb: torch.Tensor, input_ub: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def concretize(self, input_lb: torch.Tensor, input_ub: torch.Tensor):
         """
         Concretize symbolic bounds given concrete input bounds
         
@@ -98,7 +98,7 @@ class SymbolicIntervalVerifier(BaseVerifier):
         self.extract_counterexample = extract_counterexample  # Flag to enable/disable counterexample extraction
 
     def _relu_symbolic_transformer(self, input_lb: torch.Tensor, input_ub: torch.Tensor,
-                                            symbolic_bounds: SymbolicBounds) -> SymbolicBounds:
+                                            symbolic_bounds: SymbolicBounds):
         """
         Symbolic Interval ReLU transformer based on "Efficient Formal Safety Analysis of Neural Networks" 2018.
         
@@ -213,7 +213,7 @@ class SymbolicIntervalVerifier(BaseVerifier):
 
 
 
-    def _abstract_constraint_solving_core(self, model: nn.Module, input_lb: torch.Tensor, input_ub: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _abstract_constraint_solving_core(self, model: nn.Module, input_lb: torch.Tensor, input_ub: torch.Tensor):
         """
         Symbolic interval propagation through the network
         """
@@ -460,7 +460,7 @@ class SymbolicIntervalVerifier(BaseVerifier):
         
         return output_lb.view(current_shape), output_ub.view(current_shape), None
 
-    def _compute_difference_bounds(self, true_label: int, other_label: int) -> tuple:
+    def _compute_difference_bounds(self, true_label: int, other_label: int):
         """
         Compute bounds for the difference: output[true_label] - output[other_label]
         
@@ -507,7 +507,7 @@ class SymbolicIntervalVerifier(BaseVerifier):
         
         return diff_lb, diff_ub
 
-    def _abstract_constraint_solving(self, input_lb: torch.Tensor, input_ub: torch.Tensor, sample_idx: int) -> VerificationStatus:
+    def _abstract_constraint_solving(self, input_lb: torch.Tensor, input_ub: torch.Tensor, sample_idx: int):
         print(f"Performing Symbolic Interval propagation (IBP+Symbolic Interval method for ReLU networks)")
 
         output_lb, output_ub, _ = self._abstract_constraint_solving_core(
@@ -557,11 +557,11 @@ class SymbolicIntervalVerifier(BaseVerifier):
             
             print()
             if all_differences_positive:
-                print(f"  ✅ All difference lower bounds > 0")
+                print(f"  All difference lower bounds > 0")
                 print(f"  Conclusion: output[{true_label}] > output[j] for all j ≠ {true_label}")
                 print(f"  Result: Property VERIFIED (SAT)")
             else:
-                print(f"  ⚠️  Found {len(violations)} potential violations:")
+                print(f"  Found {len(violations)} potential violations:")
                 for j, diff_lb, diff_ub in violations[:5]:
                     print(f"    Class {j}: diff_lb = {diff_lb:8.4f} ≤ 0")
                 print(f"  Conclusion: Cannot prove output[{true_label}] > output[j] for all j")
@@ -575,10 +575,10 @@ class SymbolicIntervalVerifier(BaseVerifier):
             true_label
         )
 
-        print(f"📊 Verification verdict: {verdict.name}")
+        print(f"Verification verdict: {verdict.name}")
         return verdict
 
-    def get_counterexample(self) -> tuple[Optional[torch.Tensor], str]:
+    def get_counterexample(self):
         """
         Extract counterexample using Gurobi LP solver on symbolic interval bounds
         
@@ -747,13 +747,13 @@ class SymbolicIntervalVerifier(BaseVerifier):
                         print(f"   Logits: {actual_output.cpu().numpy()}")
                         
                         if predicted_label != true_label:
-                            print(f"\n✅ REAL COUNTEREXAMPLE FOUND!")
+                            print(f"\nREAL COUNTEREXAMPLE FOUND!")
                             print(f"   Found concrete input in perturbation region that causes misclassification")
                             model.dispose()
                             env.dispose()
                             return z_reshaped, 'found'
                         else:
-                            print(f"\n⚠️  LP found violation in linear relaxation, but actual network still correct")
+                            print(f"\nLP found violation in linear relaxation, but actual network still correct")
                             print(f"   This is expected due to ReLU over-approximation (relaxation artifact)")
                             print(f"   Property might still be violated by another input point")
                             model.dispose()
@@ -761,14 +761,14 @@ class SymbolicIntervalVerifier(BaseVerifier):
                             return None, 'relaxation_artifact'
             
             elif model.status == GRB.INFEASIBLE:
-                print(f"\n✅ LP INFEASIBLE: No counterexample exists in linear relaxation!")
+                print(f"\nLP INFEASIBLE: No counterexample exists in linear relaxation!")
                 print(f"   Property is formally verified (within relaxation bounds)")
                 model.dispose()
                 env.dispose()
                 return None, 'infeasible'
             
             elif model.status == GRB.UNBOUNDED:
-                print(f"\n⚠️  Gurobi status: UNBOUNDED - objective can grow indefinitely")
+                print(f"\nGurobi status: UNBOUNDED - objective can grow indefinitely")
                 print(f"   This suggests the LP formulation may have issues")
                 print(f"   Possible cause: Symbolic bounds may be degenerate (all zeros)")
                 print(f"   Treating as unknown")
@@ -777,20 +777,20 @@ class SymbolicIntervalVerifier(BaseVerifier):
                 return None, 'unknown'
             
             elif model.status == GRB.INF_OR_UNBD:
-                print(f"\n⚠️  Gurobi status: INF_OR_UNBD - model is either infeasible or unbounded")
+                print(f"\nGurobi status: INF_OR_UNBD - model is either infeasible or unbounded")
                 print(f"   Treating as unknown (potential numerical issues)")
                 model.dispose()
                 env.dispose()
                 return None, 'unknown'
             
             elif model.status == GRB.TIME_LIMIT:
-                print(f"\n⏱️  TIMEOUT: Gurobi reached time limit")
+                print(f"\nTIMEOUT: Gurobi reached time limit")
                 model.dispose()
                 env.dispose()
                 return None, 'unknown'
             
             else:
-                print(f"\n⚠️  Gurobi solver status: {model.status}")
+                print(f"\nGurobi solver status: {model.status}")
                 model.dispose()
                 env.dispose()
                 return None, 'unknown'
@@ -801,7 +801,7 @@ class SymbolicIntervalVerifier(BaseVerifier):
             traceback.print_exc()
             return None, 'unknown'
 
-    def verify(self) -> VerificationStatus:
+    def verify(self):
         print("Starting Symbolic Interval verification pipeline")
 
         num_samples = self.input_center.shape[0] if self.input_center.ndim > 1 else 1
@@ -832,7 +832,7 @@ class SymbolicIntervalVerifier(BaseVerifier):
 
             if initial_verdict == VerificationStatus.SAT:
                 self.clean_prediction_stats['verification_sat'] += 1
-                print(f"✅ Symbolic Interval verification success - Sample {idx+1} safe")
+                print(f"Symbolic Interval verification success - Sample {idx+1} safe")
                 results.append(initial_verdict)
                 continue
             elif initial_verdict == VerificationStatus.UNSAT:
@@ -863,17 +863,17 @@ class SymbolicIntervalVerifier(BaseVerifier):
                         results.append(VerificationStatus.UNSAT)
                     elif status == 'infeasible':
                         # LP infeasible - property actually holds!
-                        print(f"✅ LP proved no counterexample exists - property verified!")
+                        print(f"LP proved no counterexample exists - property verified!")
                         results.append(VerificationStatus.SAT)
                     elif status == 'relaxation_artifact':
                         # LP found violation but actual network is correct
-                        print(f"⚠️  Relaxation artifact - cannot determine verification status")
+                        print(f"Relaxation artifact - cannot determine verification status")
                         print(f"   Symbolic interval says UNSAT, but LP candidate doesn't violate")
                         print(f"   Returning UNKNOWN (conservative)")
                         results.append(VerificationStatus.UNKNOWN)
                     else:  # status == 'unknown'
                         # Solver error, timeout, or other issue
-                        print(f"⚠️  Cannot determine verification status (solver issue)")
+                        print(f"Cannot determine verification status (solver issue)")
                         print(f"   Returning UNKNOWN (conservative)")
                         results.append(VerificationStatus.UNKNOWN)
                 else:
